@@ -1,0 +1,206 @@
+#!/usr/bin/env python
+#         
+#
+#   HOW TO USE THIS SCRIPT:
+#       1. Dependecies:
+#            A. pxtools package - you have it in *.tar.gz format
+#
+#                tar xvf pxtools-0.0.20.tar.gz 
+#                cd pxtools-0.0.20/
+#                ./install-sh
+#                #  cc  or gcc compilers are needed, if don't exist on server:
+#                #          apt-get install gcc
+#                #          apt-get update
+#                #          apt-get upgrade
+#                #          apt-get install build-essential
+#                ./configure
+#                make
+#                make install
+#
+#            B. openerplib python library - you have it in *.tar.gz format
+#
+#            tar xvf openerp-client-lib.tar.gz
+#            cd openerp-client-lib
+#            python setup.py install
+#
+#        2. Configuration
+#
+#            At the beginning of the script at  # Parameters  section you can set: 
+#                database = <OpenERP database name where the data will be migrated>
+#                password = <The admin user password>
+#                pdox_folder = <relative path in filesystem from this script to paradox folder
+#                                with data to be migrated, e.g. ../home/calin/EXEMPLE >
+#
+#        3. Run the script:
+#
+#            >./gm_oerp def   # get default parameters from previous configuration or
+#            >./gm_oerp       # you have to introduce the data in interactive mode
+#
+#
+import sys
+import os.path
+import subprocess
+import csv
+try:
+    import openerplib
+except Exception:
+    # installing openerplib
+    # if some error too, then message
+    print ''
+    print 'Python module openerplib not found!'
+    print ''     
+    sys.exit(1)
+    
+print ""
+print "    Usage:     >./gm_oerp def   # get default parameters from script"
+print "           or  >./gm_oerp       # interactive mode"
+print ""
+
+# Parameters
+hostname = "localhost"
+database = "w_general"
+login = "admin"
+password = "w"
+pdox_folder = "../EXEMPLE"
+
+# migrating data
+file_list = ['M_CLIENT.DB','M_CLIENT.MB','M_ADRESS.DB','M_ADRESS.MB','M_ADRCLI.DB']
+px_commds = ['{path}/M_ADRESS.DB -b {path}/M_ADRESS.MB >address.csv', 
+             '{path}/M_CLIENT.DB -b {path}/M_CLIENT.MB >client.csv', 
+             '{path}/M_ADRCLI.DB >cli_adr_rel.csv']
+csv_files = ['address.csv','client.csv','cli_adr_rel.csv']
+#global connection
+
+def get_params():
+    # get openerp db name, admin pw
+    database = raw_input('The name of the OpenERP database:')
+    password = raw_input('   Enter the admin user password:')
+    # try to connect    
+    connect = openerplib.get_connection(hostname=hostname,
+                             database=database, login=login, password=password)
+    user_id = connection.get_service("common").login(database, login, password)
+    if not user_id:
+        print "Authentication failure !"
+        sys.exit(1)
+    else:
+        print "Connection successful ..."    
+    # if ok get paradox db folder,check files
+    pdox_folder = raw_input('The folder with paradox database:')
+    f_err = False
+    for file in file_list:
+        f = pdox_folder+'/'+file
+        chk_res = os.path.isfile(f)
+        if not chk_res:
+            print "File: %s not found" % f
+            f_err = True
+    if f_err:
+        sys.exit(1)
+    return connect
+
+def go_main():
+    # if command line param 'def' take the variables already set
+    if len(sys.argv)<2 or sys.argv[1]!='def': 
+        connection = get_params()
+    else:
+        connection = openerplib.get_connection(hostname=hostname,
+                             database=database, login=login, password=password)
+    # generate the csv(s)
+    for i in range(3):
+        px_comm = "pxcsvdump -D , -f " + px_commds[i].format(path=pdox_folder)
+        return_code = subprocess.call(px_comm, shell=True)
+        if return_code:
+            print 'CSV creation error! Command: %s , return code: %s' % (px_comm,return_code)
+    # creating dynamic datastruct
+    data = {} 
+    ix = 0
+    for csv_file in csv_files:
+        with open(csv_file, "rb") as csvf:
+            data[csv_file] = {}
+            records = csv.reader(csvf, delimiter=',')
+            for record in records:                
+                if csv_file=='client.csv':
+                    updt_d = {record[0]:{                                
+                                'ref':record[1],
+                                'title':record[18],
+                                'name':record[19],
+                                'credit_limit':record[39],
+                                'en_cours':record[40],                                
+                                'child_gm_ids':[],
+                                }
+                    }
+                elif csv_file=='address.csv':
+                    updt_d = {record[0]:{
+                                'name':record[6],
+                                'street':record[7],
+                                'zip':record[8],
+                                'city':record[9],
+                                'zip':record[8],
+                                'phone':record[12],
+                                'fax':record[13],
+                                'parent_id':[],                             
+                                }
+                    }
+                elif csv_file=='cli_adr_rel.csv':
+                    updt_d = {ix:{'cli':record[0],
+                                  'adr':record[1]}
+                    }
+                    ix += 1
+                else:
+                    raise NotImplementedError
+                    sys.exit(1) 
+                data[csv_file].update(updt_d)                
+    # set relation between client and address
+    for index in data['cli_adr_rel.csv'].keys():        
+        cli_gm_id = data['cli_adr_rel.csv'][index]['cli']
+        adr_gm_id = data['cli_adr_rel.csv'][index]['adr']
+        data['address.csv'][adr_gm_id]['parent_id'].append(cli_gm_id)
+        data['client.csv'][cli_gm_id]['child_gm_ids'].append(adr_gm_id)
+    # creating the oerp records
+    # ids = partner_model.search([('crmid', '=', record[2])])          # create only if not exist ?
+    partner_model = connection.get_model('res.partner')
+    created = 0
+    for cl_gm_id in data['client.csv'].keys():
+        p_data = data['client.csv'][cl_gm_id]
+        partner = {
+            'is_company':True,
+            'ref':p_data['ref'],
+            #'title':record[18],                    !!! title_id - create title or corespondent?
+            'name':p_data['name'],
+            'street':' ',                  
+            'city':' ',
+            'credit_limit':p_data['credit_limit'],
+            #'en_cours':record[40],                !!! function field - create account_move_line with credit and debit?
+            'customer':True,
+            'date':'2015-05-15',
+        }
+        p_id = partner_model.create(partner)
+        p_data['erp_id'] = p_id
+        created += 1
+        #print 'Created Partner %s' % p_id         
+    for cl_gm_id in data['client.csv'].keys():
+        p_data = data['client.csv'][cl_gm_id]
+        for child in p_data['child_gm_ids']:
+            c_data = data['address.csv'][child]
+            contact = {
+                  'name':c_data['name'].decode('ISO-8859-2'),
+                  'street':c_data['street'].decode('ISO-8859-2'),                  
+                  'city':unicode(c_data['city']),                  
+                  'phone':c_data['phone'],
+                  'fax':c_data['fax'],
+                  'parent_id':p_data['erp_id'],
+                  'use_parent_address':False,
+                  'customer':True,     
+                  'date':'2015-05-15',  
+            }  
+            if c_data['zip']:
+                contact['zip'] = int(c_data['zip'])            
+            #print contact
+            c_id = partner_model.create(contact)
+            created += 1        
+    # for all addresses without client
+    #     create like phisical persons
+    print 'Created %s partners.' % created
+    sys.exit(0)
+
+if __name__ == "__main__":
+    go_main()
