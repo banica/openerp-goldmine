@@ -1,6 +1,3 @@
-ActivMail
-=========
-
 Script for migrating main partner data from Goldmine to OpenERP
 ---------------------------------------------------------------
 
